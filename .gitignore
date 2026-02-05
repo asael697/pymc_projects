@@ -7,3 +7,5 @@
 .env
 .venv/
 *.pyc
+
+MMM_Take_Home_Assignment_Bayesian_ML.pdf
