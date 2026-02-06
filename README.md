@@ -4,8 +4,6 @@ A repository for track MMM experiments using [PyMC-marketing](https://www.pymc-m
 
 -   data: Stores the necessary data to run experiments.
 
--   discoveries: high impact scripts ready for production. These scripts follow [developers structure guide](https://www.notion.so/cassandra-mmm/MMM-Discovery-Documentation-Workflow-for-Data-Scientists-1e37dc4be0fc80498618ea0dbce0c0c8?source=copy_link)
-
 -   `pymc_toolkit`: the folder has a package structure and is an API to configure Clients, data, PymMC models, and run fleets (`production`, `forecast`, `recovery`, and `stability`),
 
 -   test: unit tests for `pymc_toolkit`.
@@ -37,7 +35,13 @@ source .env/bin/activate
 4.  Install the requirements file:
 
 ``` bash
-python -m pip install -r requirements.txt
+ pip3.11 install -r requirements.txt
+```
+
+5. To avoid conflicts install pymc-extras manually
+
+```bash
+pip3.11 install pymc-extras==0.4.0 --no-deps
 ```
 
 🎉 Now `pymc_toolkit` is ready to use!
