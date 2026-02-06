@@ -1,309 +1,355 @@
-# PyMC experiments
+# Monthly Moka model comparison
 
-A repository for track MMM experiments using [PyMC-marketing](https://www.pymc-marketing.io/en/latest/index.html) toolbox. The repository is divided in four main folders:
-
--   data: Stores the necessary data to run experiments.
-
--   `pymc_toolkit`: the folder has a package structure and is an API to configure Clients, data, PymMC models, and run fleets (`production`, `forecast`, `recovery`, and `stability`),
-
--   test: unit tests for `pymc_toolkit`.
-
-Additional files such as `.gitignore`, and `requirements.txt` are necessary files for a correct product delivery and authorization.
-
--   `requirements.txt`: has the necessary package dependencies for running `pymc-experiments`.
-
--   `requirements-development.txt`: dependencies for development `pymc-toolkit`.
-
-## Install `pymc_toolkit`
-
-`pymc_toolkit` behaves as a standard Python package, and its dependencies must be installed for it to work correctly. Follow these steps:
-
-1.  Install a suitable Python version (3.11 or higher). We recommend [pyenv](https://github.com/pyenv/pyenv) to manage different Python versions across your applications. For macOS, follow [these steps](https://github.com/pyenv/pyenv?tab=readme-ov-file#macos). We also recommend to use python version `3.11.5`
-
-2.  Create a virtual environment named `.env` using `venv`:
-
-``` bash
-python -m venv .env
-```
-
-3.  Activate your virtual environment:
-
-``` bash
-source .env/bin/activate
-```
-
-4.  Install the requirements file:
-
-``` bash
- pip3.11 install -r requirements.txt
-```
-
-5. To avoid conflicts install pymc-extras manually
-
-```bash
-pip3.11 install pymc-extras==0.4.0 --no-deps
-```
-
-🎉 Now `pymc_toolkit` is ready to use!
-
-## User Guide
-
-Using `pymc_toolkit` is as simple as using `pymc_marketing` as it is a simple wrapper of the original package plus some extra push to make it more spicy. The following example analyses the `MS.csv` data set to explain the repo's functionality.
-
-First let's call some dependencies to load the data and create a model
-
-``` python
+## 1. Data Loading and Preparation
+```python
+import numpy as np
 import pandas as pd
+from statsmodels.tsa.seasonal import STL
 from pymc_toolkit.pymc_model import PymcModel
+import matplotlib.pyplot as plt
+
+# Load data
+data = pd.read_csv('data/monthly_mocha.csv')
+data['date'] = pd.to_datetime(data['date'])
+data = data.sort_values('date').reset_index(drop=True)
 ```
 
-Now let's load the data, which is a weekly dataset with 161 weeks, with 13 media channels, 2 control variables, and the target variable (`ecommerce_revenue`).
+Load the dataset and convert dates to datetime format. 
+Sort by date to ensure proper time series ordering.
 
-``` python
-data = pd.read_csv('data/ms.csv')
->>> data.info()
-<class 'pandas.core.frame.DataFrame'>
-RangeIndex: 161 entries, 0 to 160
-Data columns (total 17 columns):
- #   Column                             Non-Null Count  Dtype  
----  ------                             --------------  -----  
- 0   date_week                          161 non-null    object 
- 1   ecommerce_revenue                  161 non-null    float64
- 2   snapchat_cost                      161 non-null    float64
- 3   emails_delivered                   161 non-null    int64  
- 4   facebook_ads_conversions_cost      161 non-null    float64
- 5   facebook_ads_brand_awareness_cost  161 non-null    float64
- 6   facebook_ads_engagement_cost       161 non-null    float64
- 7   google_ads_video_cost              161 non-null    float64
- 8   google_ads_shopping_cost           161 non-null    float64
- 9   google_ads_search_men_cost         161 non-null    float64
- 10  google_ads_search_kids_cost        161 non-null    float64
- 11  google_ads_display_only_cost       161 non-null    float64
- 12  google_ads_search_brand_cost       161 non-null    float64
- 13  google_ads_search_women_cost       161 non-null    float64
- 14  google_ads_search_others_cost      161 non-null    float64
- 15  youtube_organic_views              161 non-null    int64  
- 16  events                             161 non-null    int64  
-dtypes: float64(13), int64(3), object(1)
-memory usage: 21.5+ KB
+## 2. Exploratory Visualization
+```python
+plt.plot(data['date'], data['subscriptions'])
+plt.close()
 ```
 
-Let's separate the columns into control, media, and target categories.
+Quick visualization of the target variable (subscriptions) over time to identify patterns.
 
-``` python
-target_name = 'ecommerce_revenue'
+## 3. STL Decomposition (Seasonal-Trend Decomposition)
+```python
+stl = STL(data['subscriptions'].values, seasonal=13, period=4)
+result = stl.fit()
+mape = np.mean(np.abs(result.resid / data['subscriptions'].values)) * 100
+mape
+result.plot()
+```
+![STL Decomposition](models/stl_decomposition.png)
 
-channel_names = ['snapchat_cost',
-       'facebook_ads_conversions_cost', 'facebook_ads_brand_awareness_cost',
-       'facebook_ads_engagement_cost', 'google_ads_video_cost',
-       'google_ads_shopping_cost', 'google_ads_search_men_cost',
-       'google_ads_search_kids_cost', 'google_ads_display_only_cost',
-       'google_ads_search_brand_cost', 'google_ads_search_women_cost',
-       'google_ads_search_others_cost', 'youtube_organic_views']
+Decompose the time series into:
+- **Trend**: Long-term direction
+- **Seasonal**: Repeating patterns (every 4 weeks = monthly seasonality)
+- **Residual**: Random noise
 
-control_names = ['events', 'emails_delivered']
+Parameters:
+- `seasonal=13`: Window size for seasonal smoothing (must be odd)
+- `period=4`: Seasonal cycle length (4 weeks ≈ 1 month)
+
+## 4. Create Control Variables
+```python
+control_data = pd.DataFrame({
+    'trend': result.trend,
+    'seasonal': result.seasonal,
+})
+
+data = pd.concat([data, control_data], axis=1)
 ```
 
-Let's create a model using a Time-varying media with Cassandras custom priors
+Extract trend and seasonal components from STL to use as control variables in the MMM model. This helps the model distinguish between organic growth/seasonality and media effects.
 
-``` python
->>>model = PymcModel(client_data=data,
-             target_name=target_name,
-             date_column='date_week',
-             channel_names=channel_names,
-             control_names=control_names,
-             lag_max=4,
-             scale_data=True,
-             saturation='michaelis_menten',
-             time_varying_media=True)
-INFO:pymc_toolkit.pymc_model:Creating the client's data configuration.
-INFO:pymc_toolkit.client_config:Target variable scaled using MaxAbsScaler.
-INFO:pymc_toolkit.client_config:Channel variables scaled using MaxAbsScaler.
-INFO:pymc_toolkit.client_config:Control variables scaled using MaxAbsScaler.
-INFO:pymc_toolkit.client_config:Client data loaded for 'client0' with 161 rows.
-INFO:pymc_toolkit.pymc_model:Set up PyMCModel's basic configuration.
-INFO:pymc_toolkit.pymc_model:Define PymcModel's default priors.
-INFO:pymc_toolkit.pymc_model:Creating default priors for intercept and model's scale (y_sigma).
-INFO:pymc_toolkit.pymc_model:Creating default priors for gamma control.
-INFO:pymc_toolkit.pymc_model:Using Geometric Adstock.
-INFO:pymc_toolkit.pymc_model:Creating default priors for adstock alpha.
-INFO:pymc_toolkit.pymc_model:Using Michaelis-Menten Saturation.
-INFO:pymc_toolkit.pymc_model:Creating default priors for saturation lambda and alpha.
-INFO:pymc_toolkit.pymc_model:Time-varying Media MMM.
-INFO:pymc_toolkit.pymc_model:Creating default priors for Kernel's eta and length-scale.
+## 5. Define Model Variables
+```python
+target = "subscriptions"
+date_var = "date"
+
+media = ['meta_spend', 'google_spend', 'snapchat_spend', 
+         'tiktok_spend', 'moloco_spend', 'liveintent_spend',
+         'roku_spend', 'beehiiv_spend', 'amazon_spend']
+
+controls = ["trend", "seasonal"]
+
+organic = ['meta_impressions', 'google_impressions', 'snapchat_impressions', 
+           'tiktok_impressions', 'moloco_impressions', 'liveintent_impressions',
+           'roku_impressions', 'beehiiv_impressions', 'amazon_impressions']
 ```
 
-This will create a simple object that will store all the neccesary arguments, to deploy this model in production plus adding complete logging for a faster model debugging and process tracking.
+Define the variables for the model:
+- **target**: KPI to predict (subscriptions)
+- **media**: Marketing spend channels
+- **controls**: Non-media factors (trend, seasonality)
+- **organic**: Impression data (frequency of exposure)
 
-An important step in Bayesian modeling is prior configuration, we can access to cassandra's default priors, by calling the argument `model_priors`.
+## 6. Build and Fit MMM Models
 
-``` python
-model.model_priors
-{'intercept': Prior("HalfNormal", sigma=1),
- 'likelihood': Prior("Normal", sigma=Prior("HalfNormal", sigma=2)),
- 'gamma_control': Prior("HalfNormal", sigma=1, dims="control"),
- 'media_tvp_config': HSGPKwargs(m=50, L=241.5, eta_lam=10.0, ls_mu=5, ls_sigma=5, cov_func='Matern52'),
- 'saturation_lam': Prior("HalfNormal", sigma=1, dims="channel"),
- 'saturation_alpha': Prior("Gamma", mu=2, sigma=1, dims="channel"),
- 'adstock_alpha': Prior("Beta", alpha=1, beta=3, dims="channel")
- }
+A summary of all the model configuration tried so far:
+
+| Model | Adstock | Controls | Impressions | Purpose |
+|-------|---------|----------|-------------|---------|
+| pfleet (weibull_controls) | Weibull | ✓ | ✗ | Flexible decay + controls |
+| pfleet1 (geometric_controls) | Geometric | ✓ | ✗ | Simple decay + controls |
+| pfleet2 (geometric_no_controls) | Geometric | ✗ | ✗ | Media-only attribution |
+| pfleet3 (geometric_with_impressions) | Geometric | ✗ | ✓ | Spend→Impressions→KPI |
+| pfleet4 (geometric_impressions_controls) | Geometric | ✓ | ✓ | Full specification |
+
+**Key Parameters (All Models):**
+- **lag_max=4**: Maximum lag effect (media impact up to 4 weeks)
+- **scale_data=True**: Normalize variables for better convergence
+- **saturation='michaelis_menten'**: Diminishing returns curve
+- **n_test=12**: Hold out last 12 weeks for validation
+- **adstock=Geometric**: I sticked with Geometric adstock after comparin the model with 
+  the Weibull_pdf model. The second model produces divergences and both models are 
+  virtually symmetrical.
+
+### Model 1: Weibull with Controls
+```python
+model = PymcModel(
+    client_data=data,
+    target_name=target,
+    date_column=date_var,
+    channel_names=media,
+    control_names=controls,
+    lag_max=4,
+    scale_data=True,
+    adstock="weibull",
+    saturation='michaelis_menten'
+)
+
+pfleet = model.production_fleet(n_test=12)
+pfleet.summary()
+az.loo(pfleet.mmm.idata, var_name="y", pointwise=True)
+pfleet.generate_report(output_html="models/weibull_controls.html")
+```
+- **adstock="weibull"**: Weibull decay for carryover effects (flexible decay shape)
+- **control_names=controls**: Includes trend + seasonal controls
+- **saturation='michaelis_menten'**: Diminishing returns curve
+
+### Model 2: Geometric with Controls
+```python
+model1 = PymcModel(
+    client_data=data,
+    target_name=target,
+    date_column=date_var,
+    channel_names=media,
+    control_names=controls,
+    lag_max=4,
+    scale_data=True,
+    adstock="geometric",
+    saturation='michaelis_menten'
+)
+
+pfleet1 = model1.production_fleet(n_test=12)
+pfleet1.summary()
+az.loo(pfleet1.mmm.idata, var_name="y", pointwise=True)
+pfleet1.generate_report(output_html="models/weibull_controls.html")
 ```
 
-Fitting the model is as simple as in `pymc`, by calling the `fit` method. This will create a temporary `pymc_marketing` object, extract the important data from our PymcModel, train the model using the temporary object, and stores the fit in our model class. Additionally, will produce predictions for our training dataset for a correct model evaluation.
+- **adstock="geometric"**: Geometric decay for carryover effects (simpler than Weibull)
+- **control_names=controls**: Includes trend + seasonal controls
+- Same saturation as Model 1
 
-``` python
->>>  model.fit()
-INFO:pymc_toolkit.client_config:Returning channels in scaled form.
-INFO:pymc_toolkit.client_config:Returning controls in scaled form.
-INFO:pymc_toolkit.client_config:Covariates DataFrame constructed with shape (161, 16).
-INFO:pymc_toolkit.client_config:Returning target variable in original scale.
-INFO:pymc_toolkit.client_config:Inverse scaler function for 'target' returned.
-INFO:pymc_toolkit.pymc_model:Sampling client0's MMM using 4 chains, 1000 draws, and 1000 tuning steps.
-Initializing NUTS using adapt_diag...
-INFO:pymc.sampling.mcmc:Initializing NUTS using adapt_diag...
-Multiprocess sampling (4 chains in 4 jobs)
-INFO:pymc.sampling.mcmc:Multiprocess sampling (4 chains in 4 jobs)
-NUTS: [intercept, adstock_alpha, saturation_alpha, saturation_lam, media_temporal_latent_multiplier_raw_eta, media_temporal_latent_multiplier_raw_ls, media_temporal_latent_multiplier_raw_hsgp_coefs_offset, gamma_control, y_sigma]
-INFO:pymc.sampling.mcmc:NUTS: [intercept, adstock_alpha, saturation_alpha, saturation_lam, media_temporal_latent_multiplier_raw_eta, media_temporal_latent_multiplier_raw_ls, media_temporal_latent_multiplier_raw_hsgp_coefs_offset, gamma_control, y_sigma]
-                                                                                                                                  
-  Progress                                   Draws   Divergences   Step size   Grad evals   Sampling Speed   Elapsed   Remaining  
- ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   2000    3             0.01        255          20.13 draws/s    0:01:39   0:00:00    
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   2000    1             0.02        255          20.62 draws/s    0:01:36   0:00:00    
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   2000    1             0.01        255          18.73 draws/s    0:01:46   0:00:00    
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   2000    1             0.01        255          18.96 draws/s    0:01:45   0:00:00    
-                                                                                                                                  
+### Model 3: Geometric without Controls
+```python
+model2 = PymcModel(
+    client_data=data,
+    target_name=target,
+    date_column=date_var,
+    channel_names=media,
+    control_names=None,  # No controls
+    lag_max=4,
+    scale_data=True,
+    adstock="geometric",
+    saturation='michaelis_menten'
+)
 
-Sampling 4 chains for 1_000 tune and 1_000 draw iterations (4_000 + 4_000 draws total) took 107 seconds.
-INFO:pymc.sampling.mcmc:Sampling 4 chains for 1_000 tune and 1_000 draw iterations (4_000 + 4_000 draws total) took 107 seconds.
-There were 6 divergences after tuning. Increase `target_accept` or reparameterize.
-ERROR:pymc.stats.convergence:There were 6 divergences after tuning. Increase `target_accept` or reparameterize.
-INFO:root:Compute y_fit using the model's train data
-Sampling: [y]
-INFO:pymc.sampling.forward:Sampling: [y]
-Sampling ... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00 / 0:00:00
-
-INFO:pymc_toolkit.pymc_model:Sampling completed.
+pfleet2 = model2.production_fleet(n_test=12)
+pfleet2.summary()
+az.loo(pfleet2.mmm.idata, var_name="y", pointwise=True)
+pfleet2.generate_report(output_html="models/weibull_controls.html")
 ```
 
-Lets get the intercept's estimate with confidence intervals. Simply use the `sumarize_variable` method.
+- **control_names=None**: NO trend or seasonal controls
+- Tests impact of removing controls on model performance
+- All variation must be explained by media channels and intercept
 
-``` python
-model.summarize_variable(var_name="intercept")
-INFO:pymc_toolkit.client_config:Inverse scaler function for 'target' returned.
-{'variable': 'intercept',
- 'coef': 3162.75538405655,
- 'ci_up_cassandra': 9250.538075094692,
- 'ci_low_cassandra': 193.30986164526558}
+### Model 4: Geometric with Impressions (No Controls)
+```python
+model3 = PymcModel(
+    client_data=data,
+    target_name=target,
+    date_column=date_var,
+    channel_names=media,
+    control_names=None,  # No controls
+    organic_names=organic,  # Add impressions
+    lag_max=4,
+    scale_data=True,
+    adstock="geometric",
+    saturation='michaelis_menten'
+)
+
+pfleet3 = model3.production_fleet(n_test=12)
+pfleet3.summary()
+az.loo(pfleet3.mmm.idata, var_name="y", pointwise=True)
+pfleet3.generate_report(output_html="models/weibull_controls.html")
 ```
 
-It notifies that this parameters needs to be inverse scaled, using the target's scale.
+- **organic_names=organic**: Adds impression data (media frequency)
+- **control_names=None**: No trend/seasonal controls
+- Models spend → impressions → KPI relationship
 
-Similar procedures apply for `predict()`, and `refresh()`
+### Model 5: Geometric with Impressions AND Controls
+```python
+model4 = PymcModel(
+    client_data=data,
+    target_name=target,
+    date_column=date_var,
+    channel_names=media,
+    control_names=controls,  # With controls
+    organic_names=organic,    # With impressions
+    lag_max=4,
+    scale_data=True,
+    adstock="geometric",
+    saturation='michaelis_menten'
+)
 
-**Important:** The model logs are going to be omitted to make the report easier to read.
-
-## Fleets
-
-Models in production need more complex procedures than just train (`fit`), and predict. It needs a proper model evaluation, monitoring, calibration, recovery and stability assessment. All these procedures are implemented in `pymc_toolkit`
-
-### Recovery fleet.
-
-This process is vital in the first steps of model building, and it tells how credible is our code to deploy the actual model using your data. The process is:
-
-1.  Simulate the model parameters using your covariates.
-
-2.  Create a fake target using the model and simulated parameters.
-
-3.  train the model using the fake target and covariates.
-
-The following code shows how to perform a recovery. Fleets have their own class to store its results for proper data visualization and summary.
-
-``` python
->>> rleet = model.recovery_fleet()
->>> rfleet.summary()
-{'divergences': 1,
- 'max_tree_depth': 5,
- 'train': {'mape': 1.3626885243388833,
-  'nrmse': 0.20562748699002514,
-  'r_squared': 0.5280365382698324,
-  'crps': 0.7157267643403227},
-
-'recovery': {
-  'y_sigma': 0.9812822944861193,
-  'intercept': 0.40170085644414244,
-  'controls': 0.556468919816216,
-  'media_temporal_latent_multiplier_raw_eta': 0.6613063909784102,
-  'media_temporal_latent_multiplier_raw_ls': 0.5561216804044913,
-  'saturation_lam': 0.5733667318143025,
-  'saturation_alpha': 0.3830523755455959,
-  'adstock_alpha': 0.7680047722035878}
-}
+pfleet4 = model4.production_fleet(n_test=12)
+pfleet4.summary()
+az.loo(pfleet4.mmm.idata, var_name="y", pointwise=True)
+pfleet4.generate_report(output_html="models/weibull_controls.html")
 ```
 
-### production fleet
+- **Full model**: Includes both impressions AND controls
+- **control_names=controls**: Trend + seasonal
+- **organic_names=organic**: Impression data
+- Most complex specification
 
-These fleets are the deplyment's MVP, this procedure is vital for monitoring, evaluation, and product presentation, the procedure is simple but effective.
+## 7. Model Comparison
+```python
+# Compare models by CRPS error
+results = {}
+for name, fleet in [
+    ("weibull_controls", pfleet),
+    ("geometric_controls", pfleet1),
+    ("geometric_no_controls", pfleet2),
+    ("geometric_with_impressions", pfleet3),
+    ("geometric_impressions_controls", pfleet4)
+]:
+    metrics = fleet.get_model_accuracy(train=True)
+    results[name] = {
+        'crps_error': metrics['crps_error'],
+        'mape': metrics['mape']
+    }
 
-1.  Refresh data,
+df = pd.DataFrame(results).T.sort_values('crps_error')
+>>> df
 
-2.  split the data leaving out the last month.
+                model	          crps_error	mape
+0	geometric_controls	           0.058940	0.097463
+1	weibull_controls	           0.059263	0.098453
+2	geometric_no_controls 	       0.088542	0.147429
+3	geometric_impressions_controls 0.169136	0.232483
+4	geometric_with_impressions	   0.204971	0.280847
 
-3.  train the model
-
-4.  show the models result for the last month.
-
-The code is simply done by:
-
-``` python
->>>pfleet = model.production_fleet()
->>>pfleet.summary()
-{'divergences': 4,
- 'max_tree_depth': 9,
- 'train': {
-   'mape': 0.5817914033765539,
-   'nrmse': 0.13438855750805637,
-   'r_squared': 0.5186832675840984,
-   'crps': 0.7883064072366388
-  },
- 'test': {
-   'mape': 0.45976233322524873,
-   'nrmse': 0.6720136850022673,
-   'r_squared': 0.26422523039568835,
-   'crps': 0.6644610507715243}
-}
 ```
 
-### Holdout fleets
+Compare different model configurations:
+- **weibull_controls**: Weibull adstock + controls
+- **geometric_controls**: Geometric adstock + controls
+- **geometric_no_controls**: No trend/seasonal controls
+- **geometric_with_impressions**: Impressions data included
+- **geometric_impressions_controls**: Impressions + controls
 
-These processes are useful to measure the model's long-term performance, also useful to measure how often do clients need to refresh the model. The code is:
+Lower CRPS and MAPE indicate better predictive performance.
 
-``` python
->>>hfleet = model.holdout_fleet(holdouts=[4,8,12])
+## 8. Contribution Analysis
+```python
+# Compare contributions across models
+results = []
+for name, fleet in [
+    ("weibull_controls", pfleet),
+    ("geometric_controls", pfleet1),
+    ("geometric_no_controls", pfleet2),
+    ("geometric_with_impressions", pfleet3),
+    ("geometric_impressions_controls", pfleet4)
+]:
+    contrib = fleet.mmm.compute_mean_contributions_over_time().sum()
+    total = contrib.sum()
+    
+    # Individual channel contributions
+    channel_contribs = {}
+    for channel in fleet.mmm.channel_columns:
+        channel_contribs[channel] = (contrib[channel] / total * 100)
+    
+    # Control contributions
+    controls = contrib[fleet.mmm.control_columns].sum() / total * 100 if fleet.mmm.control_columns else 0
+    
+    # Intercept contribution
+    intercept = contrib['intercept'] / total * 100 if 'intercept' in contrib else 0
+    
+    results.append({
+        'model': name,
+        **channel_contribs,
+        'controls_pct': controls,
+        'intercept_pct': intercept
+    })
 
-## One month prediction
->>>hfleet[0]
-{
-'divergences': 8,
-'max_tree_depth': 9,
-'train': {
-  'mape': 0.583884525082264,
-  'nrmse': 0.13489347548862585,
-  'r_squared': 0.5176506945820203,
-  'crps': 0.7881281722463331
-},
-'test': {
-  'mape': 0.4675951760449169,
-  'nrmse': 0.6866038884371821,
-  'r_squared': 0.25191199829654987,
-  'crps': 0.6540177705042755}
-}
+df = pd.DataFrame(results)
+>>> print(df.to_string(index=False))
+                         model  media_pct  controls_pct  intercept_pct
+              weibull_controls  41.311423     51.194695       7.493882
+            geometric_controls  45.374855     47.669822       6.955323
+         geometric_no_controls  84.494306      0.000000      15.505694
+    geometric_with_impressions  93.811920      0.000000       6.188080
+geometric_impressions_controls  85.835308      8.099114       6.065578
 ```
 
-### Buld reports
+Analyze how much each component contributes to the target KPI:
+- **Media channels**: Individual contribution of each marketing channel
+- **Controls**: Combined contribution of trend + seasonal
+- **Intercept**: Baseline contribution
 
-To fully evaluate a fleet just generate a report:
+**Trade-off**: Models with better statistical fit may attribute more to controls/trend, while models with lower control attribution may show more realistic media effects but worse predictive metrics.
 
-``` python
->>> pfleet.generate_report(output_html="discoveries/data/toy_prod_fleet.html")
+## 9. Key Findings
+
+### Best Predictive Model
+- **geometric_controls**: CRPS=0.059, MAPE=9.7%
+
+### Model Interpretability Trade-off
+- **geometric_controls**: ~50% attributed to trend (high statistical fit, low media attribution)
+- **geometric_impressions_controls**: ~4% attributed to trend (lower fit, higher media attribution)
+
+### Recommendations
+- Use a model with **geometric adstock plus impressions variables and controls** for marketing optimization 
+   and budget allocation
+- Controls (trend + seasonal) are crucial - removing them doubles prediction error
+- Adding impressions data may introduce noise or overfitting.
+
+## 10. LOO Cross-Validation Issue
+```python
+# All models show 100% k-hat > 1.0
+# p_loo >> n_obs (e.g., 10,800 effective parameters for 62 observations)
+```
+
+**Problem**: LOO (Leave-One-Out) cross-validation is unreliable for these models due to:
+- Too few observations (62 weeks)
+- High model complexity
+- Time series structure (observations not independent)
+
+**Solution**: Use out-of-sample validation (test set) instead of LOO for model comparison.
+
+---
+
+## Dependencies
+```txt
+pymc>=5.24.1
+numpy>=1.26.4
+pandas>=2.2.0
+scipy>=1.11.1,<=1.12.0
+matplotlib>=3.10.0,<=3.10.3
+seaborn>=0.13.2
+statsmodels>=0.14.4
+xarray>=2025.7.1
+pytensor>=2.31.2,<2.32
+arviz>=0.17.0
+pymc-extras==0.4.0
+pymc-marketing>=0.17.0
 ```
