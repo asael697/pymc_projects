@@ -71,6 +71,7 @@ class PymcModel:
       date_column: str = "ds",
       control_names: Optional[List[str]] = None, 
       target_name: str = "y",
+      depvar_type: str = 'revenue',
       client_name: Optional[str] = None,
       lag_max: int = 1,
       scale_data: bool = False,
@@ -105,6 +106,7 @@ class PymcModel:
       self.channel_columns = self.client_configuration.channel_names
       self.control_columns = self.client_configuration.control_names
       self.lift_tests = self.client_configuration.calibration_inputs
+      self.depvar_type = depvar_type
 
       # Store the sampled MMM  
       self.model_fit = None
@@ -690,6 +692,7 @@ class PymcModel:
             X_test=X_test,
             y_test=y_test,
             y_pred=y_pred,
+            depvar_type=self.depvar_type,
             real_parameters=real_parameters)
         
     def production_fleet(

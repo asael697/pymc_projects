@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import arviz as az
 import matplotlib.pyplot as plt
+import pymc as pm
 
 from pymc_marketing.mmm import MMM
 from typing import Dict, Union, Optional
@@ -55,6 +56,7 @@ class FleetResult:
         y_pred: np.ndarray,
         X_test: Optional[pd.DataFrame] = None,
         y_test: Optional[np.ndarray] = None,
+        depvar_type: str = 'revenue',
         real_parameters: Optional[Dict[str, Union[float, list]]] = None):
 
         logger.info("Initializing FleetResult...")
@@ -65,6 +67,7 @@ class FleetResult:
         self.y_pred = y_pred
         self.X_test = X_test
         self.y_test = y_test
+        self.depvar_type = depvar_type
         self.real_parameters = real_parameters
         self.model_variables = self._get_model_variables()
 
@@ -91,6 +94,25 @@ class FleetResult:
             if self.y_test is None
             else "production"
         )
+        # Compute log-likelihood for LOO diagnostics
+        self._compute_log_likelihood()
+        logger.info(f"FleetResult initialized successfully (type='{self.type}').")
+ 
+    def _compute_log_likelihood(self):
+        """
+        Compute log-likelihood for the model if not already present.
+        This enables LOO cross-validation diagnostics.
+        """  
+        try:
+            if not hasattr(self.mmm.idata, 'log_likelihood'):
+                logger.info("Computing log-likelihood for LOO diagnostics...")
+                with self.mmm.model:
+                    pm.compute_log_likelihood(self.mmm.idata)
+                logger.info("Log-likelihood computed successfully.")
+            else:
+                logger.info("Log-likelihood already present in idata.")
+        except Exception as e:
+            logger.warning(f"Could not compute log-likelihood: {e}")
 
     def __repr__(self):
         return f"FleetResult(type='{self.type}')"
@@ -210,6 +232,9 @@ class FleetResult:
                 model_variables.remove(drop)
                 model_variables.append("y_sigma")
         
+        if mmm.control_columns is None:
+            model_variables.remove('gamma_control')
+
         if mmm.time_varying_media:
             model_variables.extend(["media_temporal_latent_multiplier_raw_eta",
                                 "media_temporal_latent_multiplier_raw_ls"])
@@ -259,13 +284,25 @@ class FleetResult:
         plt.close(fig)
         
         # --- ROAS plot ---
-        fig = plot_roas(mmm)
+        fig = plot_roas(mmm,depvar_type = self.depvar_type)
         plots["roas"] = fig
         plt.close(fig)
         
         # --- Posterior predictive y_fit ---
-        mmm.sample_posterior_predictive(X=self.X_train, progressbar=False, extend_idata=True, var_names=["y"])
-        fig = mmm.plot_posterior_predictive(original_scale=True)
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        y_pred = self.y_fit
+        y_pred_median = np.median(y_pred, axis=0)
+        
+        x = np.arange(len(self.y_train))
+        ax.plot(x, self.y_train, 'o', label='Observed', alpha=0.6)
+        ax.plot(x, y_pred_median, label='Predicted (median)', linewidth=2)
+        ax.set_xlabel('Time Index')
+        ax.set_ylabel('Target')
+        ax.set_title('Posterior Predictive Fit (Train)')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
         plots["train_fit"] = fig
         plt.close(fig)
         

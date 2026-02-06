@@ -450,7 +450,7 @@ def filter_by_dates(data:pd.DataFrame, date_name:str, start_date:str=None, end_d
 #              Plot utilities 
 ###############################################################################################
 
-def plot_roas(mmm):
+def plot_roas(mmm, depvar_type = 'revenue'):
     """
     Computes ROAS per channel from a Media Mix Model (MMM) object,
     generates ArviZ diagnostic plots (forest and posterior), 
@@ -471,16 +471,21 @@ def plot_roas(mmm):
     channel_contribution_original_scale = mmm.compute_channel_contribution_original_scale()
     spend_sum = mmm.X.loc[:, mmm.channel_columns].sum().to_numpy()
     
-    roas_samples = channel_contribution_original_scale.sum(dim="date") / spend_sum[np.newaxis, np.newaxis, :]
-        
+    if depvar_type == 'revenue':
+        roas_samples = channel_contribution_original_scale.sum(dim="date") / spend_sum[np.newaxis, np.newaxis, :]
+        roas_type = "ROAS"
+    else:
+        roas_samples = spend_sum[np.newaxis, np.newaxis, :] /channel_contribution_original_scale.sum(dim="date")
+        roas_type = "CAC"
+
     # --- Horizontal bar plot of average ROAS ---
     roas_mean = roas_samples.mean(dim=['chain', 'draw'])
     fig, ax = plt.subplots(figsize=(8, 4))
     colors = plt.cm.tab10(np.arange(len(roas_mean['channel'])))
     ax.barh(roas_mean['channel'].values, roas_mean.values, color=colors)
-    ax.set_xlabel("ROAS")
+    ax.set_xlabel(f"{roas_type}")
     ax.set_ylabel("Channels")
-    ax.set_title("Average ROAS per Channel")
+    ax.set_title(f"Average {roas_type} per Channel")
     plt.tight_layout()
     plt.show()
     

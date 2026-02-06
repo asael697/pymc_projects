@@ -8,3 +8,4 @@ xarray==2025.7.1
 pymc-extras==0.4.0
 pymc-marketing==0.16.0
 pytensor==2.31.5
+statsmodels==0.14.4
