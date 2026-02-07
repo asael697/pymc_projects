@@ -27,8 +27,15 @@ control_data = pd.DataFrame({
 })
 
 
-data = pd.concat([data,control_data],axis = 1)
+data = pd.concat([data,control_data], axis = 1)
+data['revenue_per_kpi'] = data['subscriptions'] * 100
 data.to_csv('data/monthly_mocha_ctrls.csv')
+
+data_train = data[:-4]
+data_test = data[-4:]
+
+data_train.to_csv('data/train_m_mocha.csv')
+data_test.to_csv('data/test_m_mocha.csv')
 
 target = "subscriptions"
 
