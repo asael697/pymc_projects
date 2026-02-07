@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 
 from meridian_toolkit.meridian_model import MeridianModel
 
@@ -15,16 +14,16 @@ impressions = ['meta_impressions', 'google_impressions', 'snapchat_impressions',
 
 
 model1 = MeridianModel(
-    client_data_path="data/train_m_mocha.csv",
+    client_data_path="data/monthly_mocha_ctrls.csv",
     date_var="date",
     target_name="subscriptions",
     depvar_type="non_revenue",
     channel_names=media,
     impression_names=impressions,
     control_names=None,
-    adstock="geometric",
-    lag_max=4,
-    n_validate=8,
+    adstock="binomial",
+    lag_max=8,
+    n_validate=4,
     time_varying_intercept=False,
     knots_percents=0.5)
 
