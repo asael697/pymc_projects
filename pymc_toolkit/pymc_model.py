@@ -13,8 +13,7 @@ from pymc_toolkit.client_config import ClientConfig
 from pymc_marketing.mmm import MichaelisMentenSaturation, LogisticSaturation
 from pymc_marketing.mmm import MMM, GeometricAdstock, HillSaturation, WeibullPDFAdstock
 
-from pymc_toolkit.utils import (rolling_split,
-                            recovery_summary)
+from pymc_toolkit.utils import rolling_split, recovery_summary
 
 logger = logging.getLogger(__name__)
 
