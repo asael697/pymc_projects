@@ -1,12 +1,18 @@
+import os
+import tempfile
 import logging
-import pandas as pd
+import numpy as np
 import arviz as az
+import pandas as pd
 import matplotlib.pyplot as plt
 
 from meridian.model import prior_distribution
+from meridian.analysis import visualizer
+from meridian.analysis import analyzer
 from meridian.data import load
 from meridian.model import model
 from meridian.model import spec
+
 
 from typing import Optional, List
 from meridian_toolkit.utils import create_media_mapping, compute_holdout_id
@@ -41,7 +47,7 @@ class MeridianModel:
         Type of dependent variable. Options: 'revenue' or 'conversion'.
     revenue_per_kpi : str, optional
         Column name for revenue per KPI conversion (for non-revenue KPIs).
-    n_test : int, default 12
+    n_validate : int, default 12
         Number of observations to hold out for testing (from the end).
     lag_max : int, default 8
         Maximum lag for adstock carryover effects.
@@ -66,19 +72,6 @@ class MeridianModel:
         Whether the model has been fitted (sampled).
     model_variables : List[str]
         List of parameter names in the posterior (available after fitting).
-    
-    Examples
-    --------
-    >>> model = MeridianModel(
-    ...     client_data_path='data.csv',
-    ...     channel_names=['meta_spend', 'google_spend'],
-    ...     impression_names=['meta_impressions', 'google_impressions'],
-    ...     target_name='revenue',
-    ...     n_test=12
-    ... )
-    >>> model.fit(n_chains=4, n_draws=1000, n_tune=1000)
-    >>> summary = model.mcmc_summary()
-    >>> model.mcmc_plot(var_names=['roi'])
     """
     
     def __init__(
@@ -91,7 +84,7 @@ class MeridianModel:
         target_name: str = "y",
         depvar_type: str = 'revenue',
         revenue_per_kpi: Optional[str] = None,
-        n_test: int = 12,
+        n_validate: int = 12,
         lag_max: int = 8,
         adstock: str = "binomial",
         time_varying_intercept: bool = False,
@@ -109,7 +102,7 @@ class MeridianModel:
         self.control_names = control_names or []
         self.target_name = target_name
         self.revenue_per_kpi = revenue_per_kpi
-        self.n_test = n_test
+        self.n_validate = n_validate
         self.lag_max = lag_max
         self.adstock = adstock
         self.time_varying_intercept = time_varying_intercept
@@ -118,6 +111,7 @@ class MeridianModel:
         self.prior_type = prior_type if prior_type == "roi" else "contribution"
         self.sampled_model = False
         self.model_variables = []
+        self.mcmc_diagnostics = {}
 
         # Load data
         logger.info("Loading client data...")
@@ -125,10 +119,10 @@ class MeridianModel:
         self.n_times = len(self.client_data)
         
         # Compute holdout
-        logger.info(f"Computing holdout mask (n_test={n_test})...")
+        logger.info(f"Computing holdout mask (n_validate={n_validate})...")
         self.holdout_id = compute_holdout_id(
             data_real=self.client_data, 
-            n_test=self.n_test
+            n_test=self.n_validate
         )
         
         # Compute knots
@@ -202,9 +196,72 @@ class MeridianModel:
     def __repr__(self):
         status = "fitted" if self.sampled_model else "not fitted"
         return (f"MeridianModel(channels={len(self.channel_names)}, "
-                f"n_times={self.n_times}, n_test={self.n_test}, "
+                f"n_times={self.n_times}, n_validate={self.n_validate}, "
                 f"adstock='{self.adstock}', status='{status}')")
-    
+
+    def _get_mcmc_diagnostics(self):
+        """
+        Get MCMC sampling diagnostics including divergences and tree depth.
+        Returns diagnostic information about the MCMC sampling process,
+        including divergent transitions and maximum tree depth warnings.
+        
+        Returns
+        -------
+        dict
+          Dictionary containing:
+           - 'n_divergences': Total number of divergent transitions
+           - 'divergences_by_chain': List of divergences per chain
+           - 'pct_divergences': Percentage of divergent samples
+           - 'max_treedepth': Maximum tree depth reached
+           - 'n_draws': Total number of draws (excluding warmup)
+           - 'n_chains': Number of chains
+        
+        Raises
+        ------
+        Warning
+          If the model has not been fitted yet.
+        """
+        if not self.sampled_model:
+            logger.warning("The model has not been sampled yet. Call fit() first.")
+            return None
+        
+        logger.info("Extracting MCMC diagnostics...")
+        sample_stats = self.mmm.inference_data.sample_stats
+        
+        if 'diverging' in sample_stats:
+            divergences = sample_stats['diverging'].values
+            n_divergences = int(divergences.sum())
+            divergences_by_chain = divergences.sum(axis=1).tolist()
+        else:
+            n_divergences = 0
+            divergences_by_chain = [0] * len(sample_stats.chain)
+        
+        if 'tree_depth' in sample_stats:
+            max_treedepth = int(sample_stats['tree_depth'].max())
+        else:
+            max_treedepth = None
+        
+        n_chains = len(sample_stats.chain)
+        n_draws = len(sample_stats.draw)
+        total_samples = n_chains * n_draws
+        
+        pct_divergences = (n_divergences / total_samples) * 100 if total_samples > 0 else 0
+
+        self.mcmc_diagnostics =  {
+            'n_divergences': n_divergences,
+            'divergences_by_chain': divergences_by_chain,
+            'pct_divergences': pct_divergences,
+            'max_treedepth': max_treedepth,
+            'n_draws': n_draws,
+            'n_chains': n_chains,
+            'total_samples': total_samples
+        }
+        
+        if n_divergences > 0:
+            logger.warning(f"Found {n_divergences} divergent transitions ({pct_divergences:.2f}%)")
+        else:
+            logger.info("✓ No divergent transitions detected")
+
     def fit(
         self, 
         n_chains: int = 4, 
@@ -236,10 +293,6 @@ class MeridianModel:
         -------
         None
             Updates the model in-place and sets sampled_model=True.
-        
-        Examples
-        --------
-        >>> model.fit(n_chains=4, n_draws=2000, n_tune=1000, seed=42)
         """
         cores = n_chains if cores is None else cores
 
@@ -257,9 +310,11 @@ class MeridianModel:
             seed=seed,
             parallel_iterations=cores
         )
-        
+
         logger.info("Model sampling completed successfully.")
         self.sampled_model = True
+        self._get_mcmc_diagnostics()
+
         self.model_variables = list(self.mmm.inference_data.posterior.data_vars)
         logger.info(f"Sampled {len(self.model_variables)} parameters")
     
@@ -291,11 +346,6 @@ class MeridianModel:
         ------
         Warning
             If the model has not been fitted yet.
-        
-        Examples
-        --------
-        >>> summary = model.mcmc_summary(var_names=['roi', 'beta_m'], hdi_prob=0.95)
-        >>> print(summary)
         """
         if not self.sampled_model:
             logger.warning("The model has not been sampled yet. Call fit() first.")
@@ -342,14 +392,6 @@ class MeridianModel:
         ------
         Warning
             If the model has not been fitted yet.
-        
-        Examples
-        --------
-        >>> # Plot all parameters
-        >>> model.mcmc_plot()
-        
-        >>> # Plot specific parameters
-        >>> model.mcmc_plot(var_names=['roi', 'beta_m'], compact=True)
         """
         if not self.sampled_model:
             logger.warning("The model has not been sampled yet. Call fit() first.")
@@ -372,3 +414,447 @@ class MeridianModel:
         
         plt.show()
         return axes
+    
+    def get_model_fit(self, confidence_level: float = 0.90) -> pd.DataFrame:
+        """
+        Get model fit with mean and confidence intervals. 
+        Extracts the expected KPI values from the model fit, including the mean
+        and confidence intervals, and reshapes into a wide format with time as
+        rows and metrics (ci_lo, mean, ci_hi) as columns. Also includes a column
+        indicating train/test split. 
+        
+        Parameters
+        ----------
+        confidence_level : float, default 0.90
+          Confidence level for the credible intervals (e.g., 0.90 for 90% CI).
+        
+        Returns
+        -------
+        pd.DataFrame
+          DataFrame with shape (n_times, 4) where:
+           - Index: Time periods from the dataset
+           - Columns: ['ci_lo', 'mean', 'ci_hi', 'holdout']
+           - holdout: Boolean indicating test set (True) vs train set (False) 
+        Raises
+        ------
+          Warning
+            If the model has not been fitted yet.
+        """
+        if not self.sampled_model:
+            logger.warning("The model has not been sampled yet. Call fit() first.")
+            return None
+        
+        logger.info(f"Extracting model fit with {confidence_level*100}% CI...")
+        model_fit = visualizer.ModelFit(self.mmm, confidence_level=confidence_level)
+        expected_df = model_fit.model_fit_data.expected.to_dataframe()
+        expected_df = expected_df.reset_index()
+        
+        fit_wide = expected_df.pivot(
+            index='time',
+            columns='metric',
+            values='expected'
+        )
+        
+        fit_wide = fit_wide[['ci_lo', 'mean', 'ci_hi']]
+        
+        fit_wide['holdout'] = self.holdout_id
+        return fit_wide
+    
+    def plot_predict(
+            self,
+            train_window: Optional[int] = 10,
+            confidence_level: float = 0.90,
+            figsize: tuple = (14, 6),
+            cumulative: bool = False,
+            ax=None):
+        """
+        Plot model fit for train and test data with confidence intervals.
+        
+        Displays time series predictions with credible intervals, optionally
+        including the last N training points. Can also show cumulative predictions.
+        
+        Parameters
+        ----------
+        train_window : Optional[int], default 10
+          Number of most recent training points to display. 
+          If None, training is not shown. Ignored if cumulative=True.
+        confidence_level : float, default 0.90
+          Credible interval level (e.g., 0.90 for 90% CI).
+        figsize : tuple, default (14, 6)
+          Figure size (width, height). Used only if ax is None.
+        cumulative : bool, default False
+          If True, plot cumulative sums and ignore train_window.
+        ax : matplotlib.axes.Axes, optional
+          Axes object to plot on. If None, a new figure and axes are created.
+        
+        Returns
+        -------
+        matplotlib.figure.Figure or None
+          Figure object if a new one was created; otherwise None.
+        
+        Raises
+        ------
+        Warning
+          If the model has not been fitted yet.
+        """
+        if not self.sampled_model:
+            logger.warning("The model has not been sampled yet. Call fit() first.")
+            return None
+        
+        fit_df = self.get_model_fit(confidence_level=confidence_level)
+        train_df = fit_df[~fit_df['holdout']].copy()
+        test_df = fit_df[fit_df['holdout']].copy()
+        
+        y_train = self.client_data.loc[~self.holdout_id, self.target_name].values
+        y_test = self.client_data.loc[self.holdout_id, self.target_name].values
+        
+        if cumulative:
+            train_window = None
+            train_df['mean'] = train_df['mean'].cumsum()
+            train_df['ci_lo'] = train_df['ci_lo'].cumsum()
+            train_df['ci_hi'] = train_df['ci_hi'].cumsum()
+            y_train_plot = np.cumsum(y_train)
+            
+            test_df['mean'] = test_df['mean'].cumsum()
+            test_df['ci_lo'] = test_df['ci_lo'].cumsum()
+            test_df['ci_hi'] = test_df['ci_hi'].cumsum()
+            y_test_plot = np.cumsum(y_test)
+        else:
+            y_train_plot = y_train
+            y_test_plot = y_test
+        fig = None
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        
+        if train_window is not None and not cumulative:
+            train_window_df = train_df.iloc[-train_window:]
+            y_train_window = y_train_plot[-train_window:]
+            start_idx = max(0, len(train_df) - train_window)
+            
+            train_idx = np.arange(start_idx, start_idx + len(train_window_df))
+            ax.plot(
+                train_idx, 
+                y_train_window, 
+                label="Train (Observed)", 
+                color="black", 
+                linewidth=2)
+            
+            ax.axvline(
+                start_idx + len(train_window_df) - 0.5, 
+                color="gray", 
+                linestyle="--", 
+                alpha=0.7
+            )
+            test_idx = np.arange(
+                start_idx + len(train_window_df),
+                start_idx + len(train_window_df) + len(test_df)
+            )
+        else:
+            test_idx = np.arange(len(test_df))
+        
+        ax.plot(test_idx, 
+           y_test_plot, 
+           label="Test (Observed)", 
+           color="green", 
+           marker="o", 
+           linestyle="-"
+        )
+        ax.plot(
+            test_idx, 
+            test_df['mean'].values, 
+            label="Prediction (Mean)", 
+            color="royalblue", 
+            linewidth=2
+        )
+        
+        ax.fill_between(
+            test_idx, 
+            test_df['ci_lo'].values, 
+            test_df['ci_hi'].values, 
+            color="royalblue", 
+            alpha=0.25, 
+            label=f"{int(confidence_level * 100)}% CI"
+        )
+        # Labels and formatting
+        
+        ax.set_xlabel("Time Steps")
+        ax.set_ylabel("Target (Cumulative)" if cumulative else "Target")
+        ax.set_title("Model Fit" + (" (Cumulative)" if cumulative else ""), fontsize=16)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        return fig
+    
+    def get_channel_contribution(self) -> pd.DataFrame:
+        """
+        Get channel contributions to incremental outcome.
+        
+        Returns
+        -------
+        pd.DataFrame
+          DataFrame with columns:
+          - channel: Channel name
+          - incremental_outcome: Incremental KPI contribution
+        
+        Raises
+        ------
+        Warning
+          If the model has not been fitted yet.
+        """
+        if not self.sampled_model:
+            logger.warning("The model has not been sampled yet. Call fit() first.")
+            return None
+        
+        logger.info("Computing channel contributions...")
+        media_summary = visualizer.MediaSummary(self.mmm)
+        contrib_df = media_summary.contribution_metrics(include_non_paid=True, aggregate_times=True)        
+        contrib_df = contrib_df.drop(columns=['incremental_outcome'])
+        
+        # Rename and convert to percentage
+        contrib_df = contrib_df.rename(columns={'pct_of_contribution': 'contributions'})
+        contrib_df['contributions'] = contrib_df['contributions'] * 100
+
+        return contrib_df.reset_index(drop=True)
+    
+    def get_channel_roi(self) -> pd.DataFrame:
+        """
+        Get channel ROI (Return on Investment).
+        
+        Returns
+        -------
+        pd.DataFrame
+          DataFrame with ROI metrics by channel
+        Raises
+        ------
+        Warning
+          If the model has not been fitted yet.
+        """
+        if not self.sampled_model:
+            logger.warning("The model has not been sampled yet. Call fit() first.")
+            return None
+        
+        logger.info("Computing channel ROI...")
+        media_summary = visualizer.MediaSummary(self.mmm)
+        media_summary.contribution_metrics(include_non_paid=True, aggregate_times=True)
+        
+        roi_df = media_summary._summary_metric_to_df(metric="roi")
+        
+        return roi_df
+    
+    def get_test_predictions(self, confidence_level: float = 0.90) -> pd.DataFrame:
+        """
+        Get predictions for the test (holdout) set.
+        Extracts model predictions and observed values for holdout observations only.
+        
+        Parameters
+        ----------
+        confidence_level : float, default 0.90
+          Confidence level for prediction intervals
+        
+        Returns
+        -------
+        pd.DataFrame
+          DataFrame with columns:
+          - time: Date/time index
+          - ci_lo: Lower bound of prediction interval
+          - mean: Mean prediction
+          - ci_hi: Upper bound of prediction interval
+          - holdout: Boolean (always True)
+          - observed: Actual observed values
+        
+        Raises
+        ------
+        Warning
+          If the model has not been fitted yet or no holdout data exists.
+        """
+        if not self.sampled_model:
+            logger.warning("The model has not been sampled yet. Call fit() first.")
+            return None
+        
+        logger.info("Extracting test set predictions...")
+        df = self.get_model_fit(confidence_level=confidence_level)
+        df = df.reset_index()
+        df['observed'] = self.client_data[self.target_name].values
+        
+        df_test = df[df['holdout']].copy()
+        if len(df_test) == 0:
+            logger.warning("No holdout data found.")
+            return None
+        
+        return df_test
+        
+    def compute_validation_errors(self, confidence_level: float = 0.90) -> dict:
+        """
+        Compute validation metrics on the test (holdout) set.
+        
+        Calculates prediction error metrics including MAPE, RMSE, MAE, and R²
+        for the holdout observations.
+        
+        Parameters
+        ----------
+        confidence_level : float, default 0.90
+          Confidence level for model fit extraction
+        
+        Returns
+        -------
+        dict
+          Dictionary containing:
+            - 'mape': Mean Absolute Percentage Error (%)
+            - 'rmse': Root Mean Squared Error
+            - 'mae': Mean Absolute Error
+            - 'r_squared': R-squared
+            - 'n_test': Number of test observations 
+        
+        Raises
+        ------
+          Warning
+             If the model has not been fitted yet or no holdout data exists.
+        """
+        if not self.sampled_model:
+            logger.warning("The model has not been sampled yet. Call fit() first.")
+            return None
+        
+        logger.info("Computing validation errors on holdout set...")
+        
+        df = self.get_model_fit(confidence_level=confidence_level)
+        df = df.reset_index()
+        
+        df['observed'] = self.client_data[self.target_name].values
+        
+        df_test = df[df['holdout']].copy()
+        
+        if len(df_test) == 0:
+            logger.warning("No holdout data found. Cannot compute validation errors.")
+            return None
+        
+        # Extract predictions and actuals
+        y_pred = df_test['mean'].values
+        y_true = df_test['observed'].values
+        
+        # Compute metrics
+        errors = y_pred - y_true
+        abs_errors = np.abs(errors)
+        pct_errors = abs_errors / np.abs(y_true)
+        
+        # MAPE (%)
+        mape = np.mean(pct_errors) * 100
+        
+        # RMSE
+        mse = np.mean(errors ** 2)
+        rmse = np.sqrt(mse)
+        
+        # MAE
+        mae = np.mean(abs_errors)
+        
+        return{
+            'mape': float(mape),
+            'rmse': float(rmse),
+            'mae': float(mae),
+            'n_test': len(df_test)
+        }
+        
+    def predict(self,new_data: pd.DataFrame,confidence_level: float = 0.90) -> pd.DataFrame:
+        """
+        Generate predictions for new data using the fitted Meridian model.
+        
+        Takes new data with media spend, impressions, and control variables,
+        applies the fitted model to generate predictions with confidence intervals.
+        
+        Parameters
+        ----------
+        new_data : pd.DataFrame
+          New input data containing:
+          - Media spend columns (matching self.channel_names)
+          - Impression columns (matching self.impression_names)
+          - Control columns (matching self.control_names)
+          - Date column (matching self.date_var)
+        confidence_level : float, default 0.90
+          Confidence level for prediction intervals
+        
+        Returns
+        -------
+        pd.DataFrame
+          DataFrame with columns:
+          - time: Date/time index
+          - ci_lo: Lower bound of prediction interval
+          - mean: Mean prediction
+          - ci_hi: Upper bound of prediction interval
+        
+        Raises
+        ------
+        Warning
+          If the model has not been fitted yet.
+        ValueError
+          If new_data is missing required columns
+        """
+        if not self.sampled_model:
+            logger.warning("The model has not been sampled yet. Call fit() first.")
+            return None
+        
+        required_cols = ([self.date_var] + self.channel_names + self.impression_names + self.control_names)
+        missing_cols = set(required_cols) - set(new_data.columns)
+        if missing_cols:
+            raise ValueError(f"Missing required columns in new_data: {missing_cols}")
+        
+        logger.info(f"Generating predictions for {len(new_data)} new observations...")
+        full_data = pd.concat([self.client_data, new_data], ignore_index=True)
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as tmp:
+            full_data.to_csv(tmp.name, index=False)
+            tmp_path = tmp.name
+        try:
+            # Create new data loader with full data
+            coord_to_columns = load.CoordToColumns(
+                time=self.date_var,
+                controls=self.control_names if self.control_names else None,
+                kpi=self.target_name,
+                revenue_per_kpi=self.revenue_per_kpi,
+                media=self.impression_names,
+                media_spend=self.channel_names)
+                
+            loader = load.CsvDataLoader(
+                csv_path=tmp_path,
+                kpi_type=self.depvar_type,
+                coord_to_columns=coord_to_columns,
+                media_to_channel=create_media_mapping(media_list=self.impression_names, suffix='_impressions'),
+                media_spend_to_channel=create_media_mapping(media_list=self.channel_names, suffix='_spend')
+            )
+            new_input_data = loader.load()
+            
+            # Get predictions using analyzer        
+            mmm_analyzer = analyzer.Analyzer(self.mmm)
+            
+            # Get expected outcome with new data
+            predictions = mmm_analyzer.expected_outcome(
+                new_data=new_input_data,
+                aggregate_times=False,
+                aggregate_geos=True,
+                use_kpi=True,
+                inverse_transform_outcome=True)
+            
+            # Extract only the new predictions (last n rows)
+            n_new = len(new_data)
+            pred_new = predictions[:, :, -n_new:]  # shape: (n_chains, n_draws, n_new)
+            # Reshape to (n_draws_total, n_new)
+            pred_flat = pred_new.numpy().reshape(-1, n_new)
+            
+            # Compute statistics
+            pred_mean = np.mean(pred_flat, axis=0)
+            pred_lower = np.percentile(pred_flat, (1 - confidence_level) / 2 * 100, axis=0)
+            pred_upper = np.percentile(pred_flat, (1 + confidence_level) / 2 * 100, axis=0)
+            # Create output DataFrame
+            predictions_df = pd.DataFrame({
+                'time': new_data[self.date_var].values,
+                'ci_lo': pred_lower,
+                'mean': pred_mean,
+                'ci_hi': pred_upper
+            })
+            
+            logger.info(f"Predictions generated successfully for {len(predictions_df)} observations")
+            return predictions_df
+
+        finally:
+            # Clean up temporary file
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
