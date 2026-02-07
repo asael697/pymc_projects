@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-import seaborn as sns
+
 from statsmodels.tsa.seasonal import STL
 from pymc_toolkit.pymc_model import PymcModel
 import matplotlib.pyplot as plt
@@ -27,7 +27,10 @@ control_data = pd.DataFrame({
     'seasonal': result.seasonal,
 })
 
-data = pd.concat([data,control_data],axis =1)
+# Force controls to contribute less than 25%
+control_data = 0.25 * control_data / control_data.max(axis = 0)
+
+data = pd.concat([data,control_data],axis = 1)
 
 target = "subscriptions"
 
