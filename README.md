@@ -489,7 +489,6 @@ lag_max_12	81.684542
 ```
 
 **Conclusion:** Baseline contribution remains stable regardless of `lag_max`. The issue is structural (controls vs. media), not a carryover modeling problem.
----
 
 ## Final Recommendation
 
