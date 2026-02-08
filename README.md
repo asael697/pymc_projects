@@ -61,8 +61,6 @@ stl = STL(data['subscriptions'].values, seasonal=13, period=4)
 result = stl.fit()
 
 result.plot()
-plt.savefig('plots/stl_decomposition.png', dpi=300, bbox_inches='tight')
-plt.close()
 ```
 
 **Parameters:**
@@ -106,13 +104,15 @@ impressions = ['meta_impressions', 'google_impressions', 'snapchat_impressions',
 
 # Note: roku channel removed (zero channel)
 ```
-We removed `roku_spend` and `roku_impressions` channels from the analysis both values
+
+Let's removed `roku_spend` and `roku_impressions` channels from the analysis both values
 were zero columns producing no value into the model/
+
 ---
 
 ## Model Configurations
 
-We tested **three model families**, each with two adstock functions (Geometric vs. Binomial):
+I tested **three model families**, each with two adstock functions (Geometric vs. Binomial):
 
 ### 1. Static Models
 **Configuration:**
