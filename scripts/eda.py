@@ -8,8 +8,16 @@ data = pd.read_csv('data/monthly_mocha.csv')
 data['date'] = pd.to_datetime(data['date'])
 data = data.sort_values('date').reset_index(drop=True)
 
-plt.plot(data['date'], data['subscriptions'])
-plt.savefig('models/depvar.png', dpi=300, bbox_inches='tight')
+
+plt.figure(figsize=(12, 6))
+plt.plot(data['date'], data['subscriptions'], linewidth=2, color='steelblue')
+plt.xlabel('Date', fontsize=12)
+plt.ylabel('Subscriptions', fontsize=12)
+plt.title('Subscriptions Over Time', fontsize=14, fontweight='bold')
+plt.grid(True, alpha=0.3)
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.savefig('plots/depvar.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 stl = STL(data['subscriptions'].values, seasonal=13, period = 4)
@@ -18,7 +26,7 @@ mape = np.mean(np.abs(result.resid / data['subscriptions'].values)) * 100
 mape
 
 result.plot()
-plt.savefig('models/stl_decomposition.png', dpi=300, bbox_inches='tight')
+plt.savefig('plots/stl_decomposition.png', dpi=300, bbox_inches='tight')
 plt.close()
 
 control_data = pd.DataFrame({
